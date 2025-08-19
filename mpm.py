@@ -43,6 +43,17 @@ attractor_strength = ti.field(dtype=ti.f32, shape=())
 attractor_pos = ti.Vector.field(3, dtype=ti.f32, shape=())
 
 
+cube_vis_points = ti.Vector.field(3, ti.f32, shape=512)  # size of the cursor cube
+
+
+@ti.kernel
+def update_cube_vis(center: ti.types.vector(3, ti.f32), size: float):
+    count = 0
+    for i, j, k in ti.ndrange(4, 4, 4):
+        pos = center + size * (ti.Vector([i, j, k]) / 3.0 - 0.5)
+        cube_vis_points[count] = pos
+        count += 1
+
 @ti.kernel
 def reset():
     for i in range(n_particles):
@@ -217,6 +228,83 @@ def substep(actual_count: int):
         vel[p], C[p] = new_v, new_C
         pos[p] += dt * vel[p]
 
+@ti.func
+def phi(pos):
+    # Sphere level set at center c radius r
+    c = ti.Vector([0.5, 0.5, 0.5])
+    r = 0.15
+    return (pos - c).norm() - r
+
+
+@ti.func
+def grad_phi(pos):
+    eps = 1e-4
+    dx = ti.Vector([eps, 0.0, 0.0])
+    dy = ti.Vector([0.0, eps, 0.0])
+    dz = ti.Vector([0.0, 0.0, eps])
+    nx = phi(pos + dx) - phi(pos - dx)
+    ny = phi(pos + dy) - phi(pos - dy)
+    nz = phi(pos + dz) - phi(pos - dz)
+    n = ti.Vector([nx, ny, nz])
+    return n.normalized()
+
+# this should happen after P2G
+@ti.kernel
+def grid_collision_response(mu: ti.f32):
+    for I in ti.grouped(grid_v):
+        if grid_m[I] > 0:
+            pos = dx * I.cast(ti.f32)
+            dist = phi(pos)
+            if dist <= 0: 
+                n = grad_phi(pos)
+                v_rel = grid_v[I]
+                vn = v_rel.dot(n)
+
+                if vn < 0: 
+                    vt = v_rel - vn * n
+                    vt_norm = vt.norm()
+
+                    if vt_norm <= -mu * vn:
+                        v_rel = ti.Vector.zero(ti.f32, 3)
+                    else:
+                        v_rel = vt + mu * (-vn) * vt.normalized()
+
+                    grid_v[I] = v_rel
+
+@ti.kernel
+def update_particle_pos(num_obj_particles:int):
+    for p in range(num_obj_particles):
+        pos[p] += dt * vel[p]
+
+# this should happen after G2p
+@ti.kernel
+def particle_collision_response(num_particles: int, mu: ti.f32):
+    for p in range(num_particles):
+        pos = pos[p]
+        dist = phi(pos)
+        if dist <= 0:
+            n = grad_phi(pos)
+            v_particle = vel[p]
+
+            v_co = ti.Vector([0.0, 0.0, 0.0])  # collision object velocity
+            v_rel = v_particle - v_co
+
+            vn = v_rel.dot(n)
+            if vn < 0:
+                vt = v_rel - vn * n
+                vt_norm = vt.norm()
+                v_rel_prime = ti.Vector([0.0, 0.0, 0.0])
+                if vt_norm <= -mu * vn:
+                    v_rel_prime = ti.Vector([0.0, 0.0, 0.0])
+                else:
+                    v_rel_prime = vt + mu * (-vn) * (vt / vt_norm)
+
+                v_new = v_rel_prime + v_co
+                vel[p] = v_new
+
+                # push particle outside
+                pos[p] = pos + n * (-dist + 1e-4)
+
 
 # GUI & rendering setup
 window = ti.ui.Window("3D MPM (.obj)", res=(800,800), vsync=True)
@@ -258,6 +346,13 @@ print(f"Loaded {num_obj_particles} snow particles")
 while window.running:
     for _ in range(int(2e-3 // dt)):
         substep(num_obj_particles)
+        grid_collision_response(mu=0.3)
+        particle_collision_response(num_obj_particles, mu=0.3)
+
+        # Now update positions
+        update_particle_pos(num_obj_particles)
+            
+            
     camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
     scene.set_camera(camera)
     scene.ambient_light((0.9,0.9,0.9))
@@ -270,6 +365,13 @@ while window.running:
         radius=0.003,
         color=tuple(material_colors[2]),
         index_count=num_obj_particles)
+    
+    scene.particles(
+        centers=cube_vis_points,
+        radius=0.004,
+        color=(1.0, 0.5, 0.0),
+        index_count=64,
+    )
 
     canvas.scene(scene)
     window.show()
