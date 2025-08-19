@@ -1,4 +1,6 @@
 import taichi as ti
+import trimesh
+import numpy as np
 
 ti.init(arch=ti.gpu)
 
@@ -58,7 +60,66 @@ def reset():
         Jp[i] = 1
         C[i] = ti.Matrix.zero(ti.f32, 3, 3)
 
+def load_obj_vertices(filename, max_particles=n_particles):
+    mesh = trimesh.load(filename, force='mesh')
+    # mesh = mesh.convex_hull # fill it with simpler shape
+    # fill the obj with random points
+    # convex_hall_mesh = mesh.convex_hull
+    spacing = 1 / 128
+    min_bound = mesh.bounds[0]
+    max_bound = mesh.bounds[1]
+    x_vals = np.arange(min_bound[0], max_bound[0], spacing)
+    y_vals = np.arange(min_bound[1], max_bound[1], spacing)
+    z_vals = np.arange(min_bound[2], max_bound[2], spacing)
+    grid = np.stack(np.meshgrid(x_vals, y_vals, z_vals, indexing='ij'), axis=-1).reshape(-1, 3)
 
+    inside = mesh.contains(grid)
+    inside_points = grid[inside]
+    
+    # points = mesh.vertices
+    surface_points = mesh.vertices
+    jitter_strength = spacing * 0.1
+    num_shell_copies = 5
+    
+    shell_points = []
+    for _ in range(num_shell_copies):
+        jitter = (np.random.rand(*surface_points.shape) - 0.5) * 2 * jitter_strength
+        shell_points.append(surface_points + jitter)
+    shell_points = np.concatenate(shell_points, axis=0)
+    
+    points = np.concatenate([inside_points, shell_points], axis=0)
+    np.random.shuffle(points)
+    
+    # if len(points) > max_particles:
+    #     indices = np.random.choice(len(points), max_particles, replace=False)
+    #     points = points[indices]
+    # elif len(points) < max_particles:
+    #     pad = max_particles - len(points)
+    #     extra = np.repeat(points[:1], pad, axis=0)
+    #     points = np.concatenate([points, extra], axis=0)
+
+    points = points[:max_particles]
+    
+    # Normalize and scale
+    points -= points.min(axis=0)
+    points /= points.max()
+    points = points * 0.3 + np.array([0.35, 0.35, 0.35]) 
+    
+    return points
+
+@ti.kernel
+def set_positions_from_numpy(np_points: ti.types.ndarray(), num_valid: int):
+    for i in range(n_particles):
+        if i < num_valid:
+            for j in ti.static(range(3)):
+                pos[i][j] = np_points[i, j]
+        else:
+            pos[i] = ti.Vector([0.0, 0.0, 0.0])
+        vel[i] = ti.Vector([0.0, 0.0, 0.0])
+        F[i] = ti.Matrix.identity(ti.f32, 3)
+        Jp[i] = 1.0
+        C[i] = ti.Matrix.zero(ti.f32, 3, 3)
+        material[i] = 2  # snow
 
 @ti.kernel
 def fill_radius():
@@ -67,21 +128,27 @@ def fill_radius():
 
 
 @ti.kernel
-def prepare_render(mat_id: int):
+def prepare_render(mat_id: int, actual_count: int):
     start = mat_id * group_size
     for i in range(group_size):
-        render_pos_group[i] = pos[start + i]
-        radius_field[i] = 0.003
+        p = start + i
+        if p < actual_count:
+            render_pos_group[i] = pos[p]
+            radius_field[i] = 0.003
+        else:
+            render_pos_group[i] = ti.Vector([0.0,0.0,0.0])
+            radius_field[i] = 0.0
 
 
 
 @ti.kernel
-def substep():
+def substep(actual_count: int):
+    # Reset grid
     for I in ti.grouped(grid_m):
         grid_v[I] = ti.Vector.zero(ti.f32, 3)
         grid_m[I] = 0
     # particle to Grid (P2G)
-    for p in pos:
+    for p in range(actual_count):
         base = (pos[p] * inv_dx - 0.5).cast(int)
         fx = pos[p] * inv_dx - base.cast(float)
         # b-spline interpolation weight between neighbor grid
@@ -134,7 +201,7 @@ def substep():
                 if I[d] > n_grid - 3 and grid_v[I][d] > 0:
                     grid_v[I][d] = 0
     # Grid back to Particle(G2P)
-    for p in pos:
+    for p in range(actual_count):
         base = (pos[p] * inv_dx - 0.5).cast(int)
         fx = pos[p] * inv_dx - base.cast(float)
         w = [0.5 * (1.5 - fx)**2, 0.75 - (fx - 1)**2, 0.5 * (fx - 0.5)**2]
@@ -152,7 +219,7 @@ def substep():
 
 
 # GUI & rendering setup
-window = ti.ui.Window("3D MPM", res=(800, 800), vsync=True)
+window = ti.ui.Window("3D MPM (.obj)", res=(800,800), vsync=True)
 canvas = window.get_canvas()
 scene = window.get_scene()
 camera = ti.ui.Camera()
@@ -161,8 +228,20 @@ camera.position(2, 2, 2)
 camera.lookat(0.5, 0.5, 0.5)
 camera.up(0, 1, 0)
 
-reset()
-fill_radius()
+USE_OBJ = True
+OBJ_PATH = "bunny.obj"
+
+if USE_OBJ:
+    points = load_obj_vertices(OBJ_PATH)
+    num_obj_particles = points.shape[0]
+    set_positions_from_numpy(points.astype(np.float32), num_obj_particles)
+else:
+    reset()
+    num_obj_particles = n_particles
+    fill_radius()
+
+# reset_from_obj("teapot.obj")
+# assert num_obj_particles <= n_particles, "Too many particles from .obj!"
 
 gravity[None] = [0, -1, 0]
 attractor_pos[None] = [0.5, 0.5, 0.5]
@@ -174,30 +253,23 @@ material_colors = [
     ti.Vector([0.9, 0.9, 0.9]),  # snow
 ]
 
+print(f"Loaded {num_obj_particles} snow particles")
+
 while window.running:
-    if window.get_event(ti.ui.PRESS):
-        if window.event.key == "r":
-            reset()
-    # if window.get_event():
-    #     if window.event.key == 'r' and window.event.type == ti.GUI.PRESS:
-    #         reset()
-
     for _ in range(int(2e-3 // dt)):
-        substep()
-
+        substep(num_obj_particles)
     camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
     scene.set_camera(camera)
-    scene.ambient_light((0.9, 0.9, 0.9))
-    scene.point_light(pos=(2, 2, 2), color=(1, 1, 1))
+    scene.ambient_light((0.9,0.9,0.9))
+    scene.point_light(pos=(2,2,2), color=(1,1,1))
 
-    for mat_id in range(3):
-        prepare_render(mat_id)
-        scene.particles(
-            centers=render_pos_group,
-            radius=0.003,
-            color=tuple(material_colors[mat_id]),
-            index_count=group_size,
-        )
+    prepare_render(0, num_obj_particles)
+
+    scene.particles(
+        centers=render_pos_group,
+        radius=0.003,
+        color=tuple(material_colors[2]),
+        index_count=num_obj_particles)
 
     canvas.scene(scene)
     window.show()
