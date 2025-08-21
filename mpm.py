@@ -54,6 +54,11 @@ def update_cube_vis(center: ti.types.vector(3, ti.f32), size: float):
         cube_vis_points[count] = pos
         count += 1
 
+def reset_from_obj(OBJ_PATH):
+    points = load_obj_vertices(OBJ_PATH)
+    num_obj_particles = points.shape[0]
+    set_positions_from_numpy(points.astype(np.float32), num_obj_particles)
+    
 @ti.kernel
 def reset():
     for i in range(n_particles):
@@ -168,7 +173,7 @@ def substep(actual_count: int):
         F[p] = (ti.Matrix.identity(ti.f32, 3) + dt * C[p]) @ F[p]
         # hardening factor ξ, 10 is a starting point for snow. as the snow get compress, it gets harder
         # h = 10.0
-        h = ti.max(0.1, ti.min(5, ti.exp(10 * (1.0 - Jp[p]))))
+        h = ti.max(0.1, ti.min(5, ti.exp(hardening_slider.value * (1.0 - Jp[p]))))
         if material[p] == 1:
             h = 0.3 # jelly is more soft
         mu, la = mu_0 * h, lambda_0 * h # mu -> shear stiffness, la ->volumetric stiffness
@@ -308,6 +313,7 @@ def particle_collision_response(num_particles: int, mu: ti.f32):
 
 # GUI & rendering setup
 window = ti.ui.Window("3D MPM (.obj)", res=(800,800), vsync=True)
+gui = ti.GUI('GUI sliders')
 canvas = window.get_canvas()
 scene = window.get_scene()
 camera = ti.ui.Camera()
@@ -331,9 +337,17 @@ else:
 # reset_from_obj("teapot.obj")
 # assert num_obj_particles <= n_particles, "Too many particles from .obj!"
 
-gravity[None] = [0, -1, 0]
 attractor_pos[None] = [0.5, 0.5, 0.5]
 attractor_strength[None] = 0.0
+
+# GUI sliders
+gravity_slider_x = 0.0
+gravity_slider_y = -1.0
+gravity_slider_z = 0.0
+hardening_slider = 10.0
+collision_mu_slider = 0.3
+ 
+gravity[None] = [gravity_slider_x, gravity_slider_y, gravity_slider_z]
 
 material_colors = [
     ti.Vector([0.1, 0.6, 0.8]),  # fluid
@@ -342,12 +356,44 @@ material_colors = [
 ]
 
 print(f"Loaded {num_obj_particles} snow particles")
+hardening_slider = gui.slider("hardening coefficient", -5.0, 15.0, step = 0.5)
+collision_mu_slider = gui.slider("collision mu", -1.0, 1.0, step = 0.01)
+# while gui.running:
+#     for e in gui.get_events(gui.PRESS):
+#         if e.key == 'z':
+#             hardening_slider.value -= 0.5
+#         if e.key == 'x':
+#             hardening_slider.value += 0.5
+#         if e.key == 'c':
+#             collision_mu_slider.value -= 0.5
+#         if e.key == 'v':
+#             collision_mu_slider.value += 0.5
+#     # gui.circle((hardening_slider.value, 0.5), radi)
+#     gui.show()
 
 while window.running:
+    for e in gui.get_events(gui.PRESS):
+        if e.key == 'z':
+            hardening_slider.value -= 0.5
+        if e.key == 'x':
+            hardening_slider.value += 0.5
+        if e.key == 'c':
+            collision_mu_slider.value -= 0.5
+        if e.key == 'v':
+            collision_mu_slider.value += 0.5
+    if window.get_event(ti.ui.PRESS):
+        if window.event.key == "r": reset_from_obj(OBJ_PATH=OBJ_PATH)
+        
+        if window.event.key == '1': mu_0 *= 1.1
+        if window.event.key == '2': mu_0 *= 0.9
+        if window.event.key == '3': lambda_0 *= 1.1
+        if window.event.key == '4': lambda_0 *= 0.9
+    
+    
     for _ in range(int(2e-3 // dt)):
         substep(num_obj_particles)
-        grid_collision_response(mu=0.3)
-        particle_collision_response(num_obj_particles, mu=0.3)
+        grid_collision_response(mu=collision_mu_slider.value)
+        particle_collision_response(num_obj_particles, mu=collision_mu_slider.value)
 
         # Now update positions
         update_particle_pos(num_obj_particles)
@@ -375,3 +421,5 @@ while window.running:
 
     canvas.scene(scene)
     window.show()
+    gui.circle((hardening_slider.value, 0.5), radius=10)
+    gui.show()
