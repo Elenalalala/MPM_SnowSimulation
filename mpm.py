@@ -327,6 +327,9 @@ def particle_collision_response(num_particles: int, mu: ti.f32):
                 pos[p] = pos + n * (-dist + 1e-4)
 
 
+def gfvec3f_from_np(v):
+    return Gf.Vec3f(float(v[0]), float(v[1]), float(v[2]))
+
 # GUI & rendering setup
 window = ti.ui.Window("3D MPM (.obj)", res=(800,800), vsync=True)
 gui = ti.GUI('GUI sliders')
@@ -353,12 +356,25 @@ else:
 if USD_AVAILABLE and record_usd:
     usd_stage = Usd.Stage.CreateNew(usd_stage_path)
     usd_stage.SetTimeCodesPerSecond(usd_fps)
+    usd_stage.SetFramesPerSecond(usd_fps) 
+    usd_stage.SetStartTimeCode(0.0)            # start at frame 0
+    usd_stage.SetEndTimeCode(0.0) 
+    
+    root_layer = usd_stage.GetRootLayer()
+    usd_stage.SetEditTarget(Usd.EditTarget(root_layer))
+    
+    positions_np0 = pos.to_numpy()[:num_obj_particles]
+    vecs0 = [gfvec3f_from_np(p) for p in positions_np0]
+    
     root = UsdGeom.Xform.Define(usd_stage, "/Sim")
+    usd_stage.SetDefaultPrim(root.GetPrim())
     usd_points = UsdGeom.Points.Define(usd_stage, "/Sim/Particles")
     usd_points.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.9, 0.9, 0.9)]))
+    
     width_val = 0.006 
     usd_points.CreateWidthsAttr(Vt.FloatArray([width_val]*num_obj_particles))
-    usd_points_attr = usd_points.CreatePointsAttr()
+    usd_points_attr = usd_points.GetPointsAttr()
+    usd_points_attr.Set(Vt.Vec3fArray(vecs0))    
 
 # reset_from_obj("teapot.obj")
 # assert num_obj_particles <= n_particles, "Too many particles from .obj!"
@@ -397,17 +413,32 @@ collision_mu_slider = gui.slider("collision mu", -1.0, 1.0, step = 0.01)
 #     # gui.circle((hardening_slider.value, 0.5), radi)
 #     gui.show()
 
+
+
 # press 'o' to toggle USD recording on/off while running
 def write_usd_frame():
     global usd_frame
     if not (USD_AVAILABLE and record_usd and usd_stage and usd_points_attr):
         return
-    # grab current positions (CPU) and write a time sample
+
     positions_np = pos.to_numpy()[:num_obj_particles]
-    # Convert to Vt.Vec3fArray
-    vecs = [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in positions_np]
-    usd_points_attr.Set(Vt.Vec3fArray(vecs), time=usd_frame)
+
+    # points at this frame
+    vecs = [gfvec3f_from_np(p) for p in positions_np]
+    t = Usd.TimeCode(float(usd_frame))
+
+    usd_points_attr.Set(Vt.Vec3fArray(vecs), time=t)
+
+    mins = positions_np.min(axis=0)
+    maxs = positions_np.max(axis=0)
+    usd_points.GetExtentAttr().Set(
+        Vt.Vec3fArray([gfvec3f_from_np(mins), gfvec3f_from_np(maxs)]),
+        time=t
+    )
+
+    usd_stage.SetEndTimeCode(float(usd_frame))
     usd_frame += 1
+
 
 try:
     while window.running:
@@ -438,6 +469,9 @@ try:
             update_particle_pos(num_obj_particles)
 
         write_usd_frame()
+        if USD_AVAILABLE and usd_points_attr:
+            times = usd_points_attr.GetTimeSamples()
+            print("[USD] time samples so far:", times)
 
         camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
         scene.set_camera(camera)
@@ -466,7 +500,9 @@ try:
 
 finally:
     if USD_AVAILABLE and usd_stage:
-        usd_stage.Save()
+        if usd_points_attr:
+            print("[USD] final time samples (points):", usd_points_attr.GetTimeSamples())
+        usd_stage.GetRootLayer().Save() 
         print(f"[USD] saved: {usd_stage_path}")
-    elif not USD_AVAILABLE:
+    else:
         print("[USD] Could not save .usda because pxr was not available:", e_usd_import)
