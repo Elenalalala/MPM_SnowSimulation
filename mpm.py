@@ -4,6 +4,22 @@ import numpy as np
 
 ti.init(arch=ti.gpu)
 
+try:
+    from pxr import Usd, UsdGeom, Gf, Vt
+    USD_AVAILABLE = True
+except Exception as e:
+    print("[USD] pxr not available. Install USD Python using pip install usd-core / pxr")
+    USD_AVAILABLE = False
+    e_usd_import = e
+
+usd_stage_path = "snow_sim.usda"   # output file
+record_usd = True                  # record every displayed frame
+usd_stage = None
+usd_points = None
+usd_points_attr = None
+usd_frame = 0                      # timeCode counter
+usd_fps = 60.0                     # how many frames per second to stamp into USD
+
 # Simulation constants
 quality = 2
 n_particles = 9000 * quality**3
@@ -333,6 +349,16 @@ else:
     reset()
     num_obj_particles = n_particles
     fill_radius()
+    
+if USD_AVAILABLE and record_usd:
+    usd_stage = Usd.Stage.CreateNew(usd_stage_path)
+    usd_stage.SetTimeCodesPerSecond(usd_fps)
+    root = UsdGeom.Xform.Define(usd_stage, "/Sim")
+    usd_points = UsdGeom.Points.Define(usd_stage, "/Sim/Particles")
+    usd_points.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.9, 0.9, 0.9)]))
+    width_val = 0.006 
+    usd_points.CreateWidthsAttr(Vt.FloatArray([width_val]*num_obj_particles))
+    usd_points_attr = usd_points.CreatePointsAttr()
 
 # reset_from_obj("teapot.obj")
 # assert num_obj_particles <= n_particles, "Too many particles from .obj!"
@@ -371,55 +397,76 @@ collision_mu_slider = gui.slider("collision mu", -1.0, 1.0, step = 0.01)
 #     # gui.circle((hardening_slider.value, 0.5), radi)
 #     gui.show()
 
-while window.running:
-    for e in gui.get_events(gui.PRESS):
-        if e.key == 'z':
-            hardening_slider.value -= 0.5
-        if e.key == 'x':
-            hardening_slider.value += 0.5
-        if e.key == 'c':
-            collision_mu_slider.value -= 0.5
-        if e.key == 'v':
-            collision_mu_slider.value += 0.5
-    if window.get_event(ti.ui.PRESS):
-        if window.event.key == "r": reset_from_obj(OBJ_PATH=OBJ_PATH)
-        
-        if window.event.key == '1': mu_0 *= 1.1
-        if window.event.key == '2': mu_0 *= 0.9
-        if window.event.key == '3': lambda_0 *= 1.1
-        if window.event.key == '4': lambda_0 *= 0.9
-    
-    
-    for _ in range(int(2e-3 // dt)):
-        substep(num_obj_particles)
-        grid_collision_response(mu=collision_mu_slider.value)
-        particle_collision_response(num_obj_particles, mu=collision_mu_slider.value)
+# press 'o' to toggle USD recording on/off while running
+def write_usd_frame():
+    global usd_frame
+    if not (USD_AVAILABLE and record_usd and usd_stage and usd_points_attr):
+        return
+    # grab current positions (CPU) and write a time sample
+    positions_np = pos.to_numpy()[:num_obj_particles]
+    # Convert to Vt.Vec3fArray
+    vecs = [Gf.Vec3f(float(p[0]), float(p[1]), float(p[2])) for p in positions_np]
+    usd_points_attr.Set(Vt.Vec3fArray(vecs), time=usd_frame)
+    usd_frame += 1
 
-        # Now update positions
-        update_particle_pos(num_obj_particles)
-            
-            
-    camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
-    scene.set_camera(camera)
-    scene.ambient_light((0.9,0.9,0.9))
-    scene.point_light(pos=(2,2,2), color=(1,1,1))
+try:
+    while window.running:
+        for e in gui.get_events(gui.PRESS):
+            if e.key == 'z':
+                hardening_slider.value -= 0.5
+            if e.key == 'x':
+                hardening_slider.value += 0.5
+            if e.key == 'c':
+                collision_mu_slider.value -= 0.5
+            if e.key == 'v':
+                collision_mu_slider.value += 0.5
+        if window.get_event(ti.ui.PRESS):
+            if window.event.key == "r":
+                reset_from_obj(OBJ_PATH=OBJ_PATH)
+            if window.event.key == 'o':
+                record_usd = not record_usd
+                print(f"[USD] recording = {record_usd}")
+            if window.event.key == '1': mu_0 *= 1.1
+            if window.event.key == '2': mu_0 *= 0.9
+            if window.event.key == '3': lambda_0 *= 1.1
+            if window.event.key == '4': lambda_0 *= 0.9
 
-    prepare_render(0, num_obj_particles)
+        for _ in range(int(2e-3 // dt)):
+            substep(num_obj_particles)
+            grid_collision_response(mu=collision_mu_slider.value)
+            particle_collision_response(num_obj_particles, mu=collision_mu_slider.value)
+            update_particle_pos(num_obj_particles)
 
-    scene.particles(
-        centers=render_pos_group,
-        radius=0.003,
-        color=tuple(material_colors[2]),
-        index_count=num_obj_particles)
-    
-    scene.particles(
-        centers=cube_vis_points,
-        radius=0.004,
-        color=(1.0, 0.5, 0.0),
-        index_count=64,
-    )
+        write_usd_frame()
 
-    canvas.scene(scene)
-    window.show()
-    gui.circle((hardening_slider.value, 0.5), radius=10)
-    gui.show()
+        camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
+        scene.set_camera(camera)
+        scene.ambient_light((0.9,0.9,0.9))
+        scene.point_light(pos=(2,2,2), color=(1,1,1))
+
+        prepare_render(0, num_obj_particles)
+
+        scene.particles(
+            centers=render_pos_group,
+            radius=0.003,
+            color=tuple(material_colors[2]),
+            index_count=num_obj_particles)
+
+        scene.particles(
+            centers=cube_vis_points,
+            radius=0.004,
+            color=(1.0, 0.5, 0.0),
+            index_count=64,
+        )
+
+        canvas.scene(scene)
+        window.show()
+        gui.circle((hardening_slider.value, 0.5), radius=10)
+        gui.show()
+
+finally:
+    if USD_AVAILABLE and usd_stage:
+        usd_stage.Save()
+        print(f"[USD] saved: {usd_stage_path}")
+    elif not USD_AVAILABLE:
+        print("[USD] Could not save .usda because pxr was not available:", e_usd_import)
