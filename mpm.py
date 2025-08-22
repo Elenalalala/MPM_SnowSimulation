@@ -457,9 +457,9 @@ try:
             if window.event.key == 'o':
                 record_usd = not record_usd
                 print(f"[USD] recording = {record_usd}")
-            if window.event.key == '1': mu_0 *= 1.1
+            if window.event.key == '1': mu_0 *= 1.1 # bigger -> feels harder, resist twisted
             if window.event.key == '2': mu_0 *= 0.9
-            if window.event.key == '3': lambda_0 *= 1.1
+            if window.event.key == '3': lambda_0 *= 1.1 # bigger -> also harder but resist volumn change
             if window.event.key == '4': lambda_0 *= 0.9
 
         for _ in range(int(2e-3 // dt)):
@@ -471,12 +471,22 @@ try:
         write_usd_frame()
         if USD_AVAILABLE and usd_points_attr:
             times = usd_points_attr.GetTimeSamples()
-            print("[USD] time samples so far:", times)
+
 
         camera.track_user_inputs(window, movement_speed=0.03, hold_key=ti.ui.RMB)
         scene.set_camera(camera)
         scene.ambient_light((0.9,0.9,0.9))
         scene.point_light(pos=(2,2,2), color=(1,1,1))
+
+        # for mat_id in range(3):
+        #     prepare_render(mat_id)
+        #     scene.particles(
+        #         centers=render_pos_group,
+        #         radius=0.003,
+        #         color=tuple(material_colors[mat_id]),
+        #         index_count=group_size,
+        #     )
+
 
         prepare_render(0, num_obj_particles)
 
